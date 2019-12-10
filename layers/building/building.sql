@@ -38,6 +38,24 @@ CREATE OR REPLACE VIEW osm_all_buildings AS (
          WHERE ST_GeometryType(obp.geometry) IN ('ST_Polygon', 'ST_MultiPolygon')
 );
 
+DROP MATERIALIZED VIEW IF EXISTS osm_all_buildings_mat CASCADE;
+CREATE MATERIALIZED VIEW osm_all_buildings_mat AS (
+    SELECT
+        --max(osm_id) AS osm_id,
+        ST_Collect(geometry) AS geometry,
+        height, min_height, levels, min_level, material, colour, hide_3d
+    FROM
+        (SELECT DISTINCT ON (osm_id) * FROM osm_all_buildings) AS t
+    GROUP BY
+        -- Cluster by windows to lower time and memory required.
+        -- 100: scale of a building block at 45° of latitude, optimized on Paris area.
+        (ST_XMin(geometry) / 100)::int,
+        (ST_YMin(geometry) / 100)::int,
+        height, min_height, levels, min_level, material, colour, hide_3d
+);
+
+CREATE INDEX osm_all_buildings_mat_geom ON osm_all_buildings_mat USING gist(geometry);
+
 CREATE OR REPLACE FUNCTION layer_building(bbox geometry, zoom_level int)
 RETURNS TABLE(geometry geometry, osm_id bigint, render_height int, render_min_height int, colour text, hide_3d boolean) AS $$
     SELECT geometry, osm_id, render_height, render_min_height,
@@ -73,14 +91,14 @@ RETURNS TABLE(geometry geometry, osm_id bigint, render_height int, render_min_he
         WHERE zoom_level = 13 AND geometry && bbox
         UNION ALL
         -- etldoc: osm_building_polygon -> layer_building:z14_
-        SELECT DISTINCT ON (osm_id)
+        SELECT --DISTINCT ON (osm_id)
            osm_id, geometry,
            ceil(COALESCE(height, levels*3.66, 5))::int AS render_height,
            floor(COALESCE(min_height, min_level*3.66, 0))::int AS render_min_height,
            material,
            colour,
            hide_3d
-        FROM osm_all_buildings
+        FROM (SELECT NULL::bigint AS osm_id, (ST_Dump(geometry)).geom AS geometry, height, min_height, levels, min_level, material, colour, hide_3d FROM osm_all_buildings_mat WHERE geometry && bbox) AS t
         WHERE
             (levels IS NULL OR levels < 1000) AND
             (min_level IS NULL OR min_level < 1000) AND
@@ -93,3 +111,36 @@ $$
 LANGUAGE SQL IMMUTABLE;
 
 -- not handled: where a building outline covers building parts
+
+-- Handle updates
+CREATE SCHEMA IF NOT EXISTS building_polygon;
+
+CREATE TABLE IF NOT EXISTS building_polygon.updates(id serial primary key, t text, unique (t));
+CREATE OR REPLACE FUNCTION building_polygon.flag() RETURNS trigger AS $$
+BEGIN
+    INSERT INTO building_polygon.updates(t) VALUES ('y') ON CONFLICT(t) DO NOTHING;
+    RETURN null;
+END;
+$$ language plpgsql;
+
+CREATE OR REPLACE FUNCTION building_polygon.refresh() RETURNS trigger AS
+  $BODY$
+  BEGIN
+    RAISE LOG 'Refresh building_polygon';
+    REFRESH MATERIALIZED VIEW osm_all_buildings_mat;
+    DELETE FROM building_polygon.updates;
+    RETURN null;
+  END;
+  $BODY$
+language plpgsql;
+
+CREATE TRIGGER trigger_flag
+    AFTER INSERT OR UPDATE OR DELETE ON osm_building_polygon
+    FOR EACH STATEMENT
+    EXECUTE PROCEDURE building_polygon.flag();
+
+CREATE CONSTRAINT TRIGGER trigger_refresh
+    AFTER INSERT ON building_polygon.updates
+    INITIALLY DEFERRED
+    FOR EACH ROW
+    EXECUTE PROCEDURE building_polygon.refresh();
