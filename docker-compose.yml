@@ -28,7 +28,7 @@ services:
       - postgres_conn
 
   openmaptiles-tools:
-    image: "openmaptiles/openmaptiles-tools:${TOOLS_VERSION}"
+    image: "openmaptiles/openmaptiles-tools:5.0-imp10-dev"
     env_file: .env
     environment:
       # Must match the version of this file (first line)
