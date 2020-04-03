@@ -71,7 +71,7 @@ services:
 
   postserve:
     image: "openmaptiles/openmaptiles-tools:${TOOLS_VERSION}"
-    command: postserve openmaptiles.yaml --verbose
+    command: postserve openmaptiles.yaml --verbose --serve=http://nginx/data/v3/
     env_file: .env
     networks:
       - postgres_conn
