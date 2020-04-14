@@ -1,3 +1,8 @@
+DROP TRIGGER IF EXISTS trigger_osm_building_relation_store ON osm_building_relation;
+DROP TRIGGER IF EXISTS trigger_osm_building_polygon_store ON osm_building_polygon;
+DROP TRIGGER IF EXISTS trigger_flag ON building_polygon.buildings;
+DROP TRIGGER IF EXISTS trigger_refresh ON building_polygon.updates;
+
 -- etldoc: layer_building[shape=record fillcolor=lightpink, style="rounded,filled",
 -- etldoc:     label="layer_building | <z13> z13 | <z14_> z14+ " ] ;
 
