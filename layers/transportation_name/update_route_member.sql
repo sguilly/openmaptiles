@@ -24,15 +24,8 @@ END;
 $$ LANGUAGE plpgsql;
 
 
--- etldoc:  osm_route_member ->  osm_route_member
-CREATE OR REPLACE FUNCTION update_osm_route_member() RETURNS VOID AS $$
-BEGIN
-  PERFORM update_gbr_route_members();
-
-  -- see http://wiki.openstreetmap.org/wiki/Relation:route#Road_routes
-  UPDATE osm_route_member
-  SET network_type =
-      CASE
+CREATE OR REPLACE FUNCTION osm_route_member_network_type(network text, name text, ref text) RETURNS route_network_type AS $$
+    SELECT CASE
         WHEN network = 'US:I' THEN 'us-interstate'::route_network_type
         WHEN network = 'US:US' THEN 'us-highway'::route_network_type
         WHEN network LIKE 'US:__' THEN 'us-state'::route_network_type
@@ -55,7 +48,17 @@ BEGIN
           THEN 'ca-transcanada'::route_network_type
         WHEN network = 'omt-gb-motorway' THEN 'gb-motorway'::route_network_type
         WHEN network = 'omt-gb-trunk' THEN 'gb-trunk'::route_network_type
-      END
+    END;
+$$ LANGUAGE SQL IMMUTABLE PARALLEL SAFE;
+
+-- etldoc:  osm_route_member ->  osm_route_member
+CREATE OR REPLACE FUNCTION update_osm_route_member() RETURNS VOID AS $$
+BEGIN
+  PERFORM update_gbr_route_members();
+
+  -- see http://wiki.openstreetmap.org/wiki/Relation:route#Road_routes
+  UPDATE osm_route_member
+  SET network_type = osm_route_member_network_type(network, name, ref)
   ;
 
 END;
