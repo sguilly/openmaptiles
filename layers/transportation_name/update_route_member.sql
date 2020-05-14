@@ -1,3 +1,9 @@
+CREATE INDEX IF NOT EXISTS osm_route_member_network_idx ON osm_route_member("network");
+CREATE INDEX IF NOT EXISTS osm_route_member_member_idx ON osm_route_member("member");
+CREATE INDEX IF NOT EXISTS osm_route_member_name_idx ON osm_route_member("name");
+CREATE INDEX IF NOT EXISTS osm_route_member_ref_idx ON osm_route_member("ref");
+CREATE INDEX IF NOT EXISTS osm_route_member_network_type_idx ON osm_route_member("network_type");
+
 CREATE TABLE IF NOT EXISTS ne_10m_admin_0_bg_buffer AS
 SELECT
   ST_Buffer(geometry, 10000)
@@ -89,10 +95,3 @@ BEGIN
     ;
 END;
 $$ LANGUAGE plpgsql;
-
-CREATE INDEX IF NOT EXISTS osm_route_member_network_idx ON osm_route_member("network");
-CREATE INDEX IF NOT EXISTS osm_route_member_member_idx ON osm_route_member("member");
-CREATE INDEX IF NOT EXISTS osm_route_member_name_idx ON osm_route_member("name");
-CREATE INDEX IF NOT EXISTS osm_route_member_ref_idx ON osm_route_member("ref");
-
-CREATE INDEX IF NOT EXISTS osm_route_member_network_type_idx ON osm_route_member("network_type");
