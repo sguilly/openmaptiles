@@ -36,7 +36,7 @@ CREATE INDEX IF NOT EXISTS osm_transportation_name_network_geometry_idx ON osm_t
 
 
 -- etldoc: osm_transportation_name_network ->  osm_transportation_name_linestring
-CREATE MATERIALIZED VIEW osm_transportation_name_linestring AS (
+CREATE TABLE IF NOT EXISTS osm_transportation_name_linestring AS
     SELECT
         (ST_Dump(geometry)).geom AS geometry,
         NULL::bigint AS osm_id,
@@ -74,7 +74,8 @@ CREATE MATERIALIZED VIEW osm_transportation_name_linestring AS (
         AND NULLIF(highway, '') IS NOT NULL
       group by name, name_en, name_de, ref, highway, construction, "level", layer, indoor, network_type
     ) AS highway_union
-) /* DELAY_MATERIALIZED_VIEW_CREATION */;
+;
+CREATE INDEX IF NOT EXISTS osm_transportation_name_linestring_name_idx ON osm_transportation_name_linestring(name);
 CREATE INDEX IF NOT EXISTS osm_transportation_name_linestring_geometry_idx ON osm_transportation_name_linestring USING gist(geometry);
 
 CREATE INDEX IF NOT EXISTS osm_transportation_name_linestring_highway_partial_idx
@@ -169,7 +170,7 @@ $$ language plpgsql;
 CREATE OR REPLACE FUNCTION transportation_name.refresh_network() RETURNS trigger AS
   $BODY$
   BEGIN
-    RAISE LOG 'Refresh transportation_name';
+    RAISE LOG 'Refresh transportation_name_network';
     PERFORM update_osm_route_member();
 
     -- REFRESH osm_transportation_name_network
@@ -210,11 +211,6 @@ CREATE OR REPLACE FUNCTION transportation_name.refresh_network() RETURNS trigger
             rm.member = hl.osm_id
     ;
 
-    REFRESH MATERIALIZED VIEW osm_transportation_name_linestring;
-    REFRESH MATERIALIZED VIEW osm_transportation_name_linestring_gen1;
-    REFRESH MATERIALIZED VIEW osm_transportation_name_linestring_gen2;
-    REFRESH MATERIALIZED VIEW osm_transportation_name_linestring_gen3;
-    REFRESH MATERIALIZED VIEW osm_transportation_name_linestring_gen4;
     DELETE FROM transportation_name.network_changes;
     DELETE FROM transportation_name.updates_network;
     RETURN null;
@@ -243,3 +239,138 @@ CREATE CONSTRAINT TRIGGER trigger_refresh_network
     INITIALLY DEFERRED
     FOR EACH ROW
     EXECUTE PROCEDURE transportation_name.refresh_network();
+
+-- Trigger to update "osm_transportation_name_linestring" from "osm_transportation_name_network"
+
+CREATE TABLE IF NOT EXISTS transportation_name.name_changes(
+    id serial primary key,
+    is_old boolean,
+    name character varying,
+    name_en character varying,
+    name_de character varying,
+    ref character varying,
+    highway character varying,
+    construction character varying,
+    "level" integer,
+    layer integer,
+    indoor boolean,
+    network_type route_network_type,
+    unique (is_old, name, name_en, name_de, ref, highway, construction, "level", layer, indoor, network_type)
+);
+
+CREATE OR REPLACE FUNCTION transportation_name.name_network_store() RETURNS trigger AS $$
+BEGIN
+    IF (TG_OP IN ('DELETE', 'UPDATE')) AND
+        (OLD."rank" = 1 OR OLD."rank" IS NULL)
+        AND (OLD.name <> '' OR OLD.ref <> '')
+        AND NULLIF(OLD.highway, '') IS NOT NULL
+    THEN
+        INSERT INTO transportation_name.name_changes(is_old, name, name_en, name_de, ref, highway, construction, "level", layer, indoor, network_type)
+        VALUES (true, OLD.name, OLD.name_en, OLD.name_de, OLD.ref, OLD.highway, OLD.construction, OLD."level", OLD.layer, OLD.indoor, OLD.network_type)
+        ON CONFLICT(is_old, name, name_en, name_de, ref, highway, construction, "level", layer, indoor, network_type) DO NOTHING;
+    END IF;
+    IF (TG_OP IN ('UPDATE', 'INSERT')) AND
+        (NEW."rank" = 1 OR NEW."rank" IS NULL)
+        AND (NEW.name <> '' OR NEW.ref <> '')
+        AND NULLIF(NEW.highway, '') IS NOT NULL
+    THEN
+        INSERT INTO transportation_name.name_changes(is_old, name, name_en, name_de, ref, highway, construction, "level", layer, indoor, network_type)
+        VALUES (false, NEW.name, NEW.name_en, NEW.name_de, NEW.ref, NEW.highway, NEW.construction, NEW."level", NEW.layer, NEW.indoor, NEW.network_type)
+        ON CONFLICT(is_old, name, name_en, name_de, ref, highway, construction, "level", layer, indoor, network_type) DO NOTHING;
+    END IF;
+    RETURN NULL;
+END;
+$$ language plpgsql;
+
+CREATE TABLE IF NOT EXISTS transportation_name.updates_name(id serial primary key, t text, unique (t));
+CREATE OR REPLACE FUNCTION transportation_name.flag_name() RETURNS trigger AS $$
+BEGIN
+    INSERT INTO transportation_name.updates_name(t) VALUES ('y')  ON CONFLICT(t) DO NOTHING;
+    RETURN null;
+END;
+$$ language plpgsql;
+
+CREATE OR REPLACE FUNCTION transportation_name.refresh_name() RETURNS trigger AS
+  $BODY$
+  BEGIN
+    RAISE LOG 'Refresh transportation_name';
+
+    -- REFRESH osm_transportation_name_linestring
+    DELETE FROM osm_transportation_name_linestring AS n
+    USING transportation_name.name_changes AS c
+    WHERE
+        c.is_old AND
+        n.name IS NOT DISTINCT FROM c.name AND n.name_en IS NOT DISTINCT FROM c.name_en AND n.name_de IS NOT DISTINCT FROM c.name_de AND n.ref IS NOT DISTINCT FROM c.ref AND n.highway IS NOT DISTINCT FROM c.highway AND n.construction IS NOT DISTINCT FROM c.construction AND n."level" IS NOT DISTINCT FROM c."level" AND n.layer IS NOT DISTINCT FROM c.layer AND n.indoor IS NOT DISTINCT FROM c.indoor AND n.network IS NOT DISTINCT FROM c.network_type;
+
+    INSERT INTO osm_transportation_name_linestring
+    SELECT
+        (ST_Dump(geometry)).geom AS geometry,
+        NULL::bigint AS osm_id,
+        name,
+        name_en,
+        name_de,
+        tags || get_basic_names(tags, geometry) AS "tags",
+        ref,
+        highway,
+        construction,
+        "level",
+        layer,
+        indoor,
+        network_type AS network,
+        z_order
+    FROM (
+      SELECT
+          ST_LineMerge(ST_Collect(geometry)) AS geometry,
+          n.name,
+          n.name_en,
+          n.name_de,
+          hstore(string_agg(nullif(slice_language_tags(n.tags || hstore(ARRAY['name', n.name, 'name:en', n.name_en, 'name:de', n.name_de]))::text, ''), ','))
+             AS "tags",
+          n.ref,
+          n.highway,
+          n.construction,
+          n."level",
+          n.layer,
+          n.indoor,
+          n.network_type,
+          min(n.z_order) AS z_order
+      FROM osm_transportation_name_network AS n
+        JOIN transportation_name.name_changes AS c ON
+            NOT c.is_old AND
+            n.name IS NOT DISTINCT FROM c.name AND n.name_en IS NOT DISTINCT FROM c.name_en AND n.name_de IS NOT DISTINCT FROM c.name_de AND n.ref IS NOT DISTINCT FROM c.ref AND n.highway IS NOT DISTINCT FROM c.highway AND n.construction IS NOT DISTINCT FROM c.construction AND n."level" IS NOT DISTINCT FROM c."level" AND n.layer IS NOT DISTINCT FROM c.layer AND n.indoor IS NOT DISTINCT FROM c.indoor AND n.network_type IS NOT DISTINCT FROM c.network_type
+      WHERE (n."rank"=1 OR n."rank" is null)
+        AND (n.name <> '' OR n.ref <> '')
+        AND NULLIF(n.highway, '') IS NOT NULL
+      group by n.name, n.name_en, n.name_de, n.ref, n.highway, n.construction, n."level", n.layer, n.indoor, n.network_type
+    ) AS highway_union;
+
+    REFRESH MATERIALIZED VIEW osm_transportation_name_linestring_gen1;
+    REFRESH MATERIALIZED VIEW osm_transportation_name_linestring_gen2;
+    REFRESH MATERIALIZED VIEW osm_transportation_name_linestring_gen3;
+    REFRESH MATERIALIZED VIEW osm_transportation_name_linestring_gen4;
+    DELETE FROM transportation_name.name_changes;
+    DELETE FROM transportation_name.updates_name;
+    RETURN null;
+  END;
+  $BODY$
+language plpgsql;
+
+
+DROP TRIGGER IF EXISTS trigger_store_transportation_name_network ON osm_transportation_name_network;
+CREATE TRIGGER trigger_store_transportation_name_network
+    AFTER INSERT OR UPDATE OR DELETE ON osm_transportation_name_network
+    FOR EACH ROW
+    EXECUTE PROCEDURE transportation_name.name_network_store();
+
+DROP TRIGGER IF EXISTS trigger_flag_name ON transportation_name.name_changes;
+CREATE TRIGGER trigger_flag_name
+    AFTER INSERT ON transportation_name.name_changes
+    FOR EACH STATEMENT
+    EXECUTE PROCEDURE transportation_name.flag_name();
+
+DROP TRIGGER IF EXISTS trigger_refresh_name ON transportation_name.updates_name;
+CREATE CONSTRAINT TRIGGER trigger_refresh_name
+    AFTER INSERT ON transportation_name.updates_name
+    INITIALLY DEFERRED
+    FOR EACH ROW
+    EXECUTE PROCEDURE transportation_name.refresh_name();
