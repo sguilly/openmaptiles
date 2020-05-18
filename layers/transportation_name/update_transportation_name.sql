@@ -91,8 +91,7 @@ CREATE INDEX IF NOT EXISTS osm_transportation_name_linestring_highway_partial_id
     WHERE highway IN ('motorway', 'trunk', 'construction');
 
 -- etldoc: osm_transportation_name_linestring -> osm_transportation_name_linestring_gen1
-CREATE MATERIALIZED VIEW osm_transportation_name_linestring_gen1 AS
-(
+CREATE OR REPLACE VIEW osm_transportation_name_linestring_gen1_view AS
 SELECT ST_Simplify(geometry, 50) AS geometry,
        osm_id,
        name,
@@ -118,8 +117,7 @@ CREATE INDEX IF NOT EXISTS osm_transportation_name_linestring_gen1_highway_parti
     WHERE highway IN ('motorway', 'trunk', 'construction');
 
 -- etldoc: osm_transportation_name_linestring_gen1 -> osm_transportation_name_linestring_gen2
-CREATE MATERIALIZED VIEW osm_transportation_name_linestring_gen2 AS
-(
+CREATE OR REPLACE VIEW osm_transportation_name_linestring_gen2_view AS
 SELECT ST_Simplify(geometry, 120) AS geometry,
        osm_id,
        name,
@@ -145,8 +143,7 @@ CREATE INDEX IF NOT EXISTS osm_transportation_name_linestring_gen2_highway_parti
     WHERE highway IN ('motorway', 'trunk', 'construction');
 
 -- etldoc: osm_transportation_name_linestring_gen2 -> osm_transportation_name_linestring_gen3
-CREATE MATERIALIZED VIEW osm_transportation_name_linestring_gen3 AS
-(
+CREATE OR REPLACE VIEW osm_transportation_name_linestring_gen3_view AS
 SELECT ST_Simplify(geometry, 200) AS geometry,
        osm_id,
        name,
@@ -172,8 +169,7 @@ CREATE INDEX IF NOT EXISTS osm_transportation_name_linestring_gen3_highway_parti
     WHERE highway IN ('motorway', 'construction');
 
 -- etldoc: osm_transportation_name_linestring_gen3 -> osm_transportation_name_linestring_gen4
-CREATE MATERIALIZED VIEW osm_transportation_name_linestring_gen4 AS
-(
+CREATE OR REPLACE VIEW osm_transportation_name_linestring_gen4_view AS
 SELECT ST_Simplify(geometry, 500) AS geometry,
        osm_id,
        name,
@@ -580,21 +576,18 @@ $BODY$
     LANGUAGE plpgsql;
 
 
-DROP TRIGGER IF EXISTS trigger_store_transportation_name_network ON osm_transportation_name_network;
 CREATE TRIGGER trigger_store_transportation_name_network
     AFTER INSERT OR UPDATE OR DELETE
     ON osm_transportation_name_network
     FOR EACH ROW
 EXECUTE PROCEDURE transportation_name.name_network_store();
 
-DROP TRIGGER IF EXISTS trigger_flag_name ON transportation_name.name_changes;
 CREATE TRIGGER trigger_flag_name
     AFTER INSERT
     ON transportation_name.name_changes
     FOR EACH STATEMENT
 EXECUTE PROCEDURE transportation_name.flag_name();
 
-DROP TRIGGER IF EXISTS trigger_refresh_name ON transportation_name.updates_name;
 CREATE CONSTRAINT TRIGGER trigger_refresh_name
     AFTER INSERT
     ON transportation_name.updates_name
