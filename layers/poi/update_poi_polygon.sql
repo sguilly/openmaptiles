@@ -55,11 +55,15 @@ $$ LANGUAGE plpgsql;
 
 CREATE OR REPLACE FUNCTION poi_polygon.refresh() RETURNS trigger AS
 $$
+DECLARE
+    t TIMESTAMP WITH TIME ZONE := clock_timestamp();
 BEGIN
     RAISE LOG 'Refresh poi_polygon';
     PERFORM update_poi_polygon();
     -- noinspection SqlWithoutWhere
     DELETE FROM poi_polygon.updates;
+
+    RAISE LOG 'Refresh poi_polygon done in %', age(clock_timestamp(), t);
     RETURN NULL;
 END;
 $$ LANGUAGE plpgsql;

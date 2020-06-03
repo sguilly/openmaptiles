@@ -109,11 +109,15 @@ $$ LANGUAGE plpgsql;
 
 CREATE OR REPLACE FUNCTION place_country.refresh() RETURNS trigger AS
 $$
+DECLARE
+    t TIMESTAMP WITH TIME ZONE := clock_timestamp();
 BEGIN
     RAISE LOG 'Refresh place_country rank';
     PERFORM update_osm_country_point();
     -- noinspection SqlWithoutWhere
     DELETE FROM place_country.updates;
+
+    RAISE LOG 'Refresh place_country rank done in %', age(clock_timestamp(), t);
     RETURN NULL;
 END;
 $$ LANGUAGE plpgsql;

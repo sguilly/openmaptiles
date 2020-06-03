@@ -56,11 +56,15 @@ $$ LANGUAGE plpgsql;
 
 CREATE OR REPLACE FUNCTION water_name_marine.refresh() RETURNS trigger AS
 $$
+DECLARE
+    t TIMESTAMP WITH TIME ZONE := clock_timestamp();
 BEGIN
     RAISE LOG 'Refresh water_name_marine rank';
     PERFORM update_osm_marine_point();
     -- noinspection SqlWithoutWhere
     DELETE FROM water_name_marine.updates;
+
+    RAISE LOG 'Refresh water_name_marine rank done in %', age(clock_timestamp(), t);
     RETURN NULL;
 END;
 $$ LANGUAGE plpgsql;
