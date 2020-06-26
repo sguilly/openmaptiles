@@ -1,60 +1,51 @@
-DROP TRIGGER IF EXISTS trigger_flag ON osm_island_polygon;
-DROP TRIGGER IF EXISTS trigger_refresh ON place_island_polygon.updates;
+DROP TRIGGER IF EXISTS trigger_update_polygon ON osm_island_polygon;
 
 -- etldoc:  osm_island_polygon ->  osm_island_polygon
-CREATE OR REPLACE FUNCTION update_osm_island_polygon() RETURNS void AS
+CREATE OR REPLACE FUNCTION update_osm_island_polygon(rec osm_island_polygon) RETURNS osm_island_polygon AS
 $$
 BEGIN
-    UPDATE osm_island_polygon SET geometry=ST_PointOnSurface(geometry) WHERE ST_GeometryType(geometry) <> 'ST_Point';
+    IF ST_GeometryType(rec.geometry) <> 'ST_Point' THEN
+        rec.geometry = ST_PointOnSurface(rec.geometry);
+    END IF;
 
-    UPDATE osm_island_polygon
-    SET tags = update_tags(tags, geometry)
-    WHERE COALESCE(tags->'name:latin', tags->'name:nonlatin', tags->'name_int') IS NULL;
+    IF COALESCE(rec.tags->'name:latin', rec.tags->'name:nonlatin', rec.tags->'name_int') IS NULL THEN
+        rec.tags = update_tags(rec.tags, rec.geometry);
+    END IF;
 
-    ANALYZE osm_island_polygon;
+    RETURN rec;
 END;
 $$ LANGUAGE plpgsql;
 
-SELECT update_osm_island_polygon();
+DO
+$$
+DECLARE
+    orig osm_island_polygon;
+    up osm_island_polygon;
+BEGIN
+    FOR orig IN SELECT * FROM osm_island_polygon
+    LOOP
+        up := update_osm_island_polygon(orig);
+        IF orig.* IS DISTINCT FROM up.* THEN
+            DELETE FROM osm_island_polygon WHERE osm_island_polygon.id = up.id;
+            INSERT INTO osm_island_polygon VALUES (up.*);
+        END IF;
+    END LOOP;
+END;
+$$ LANGUAGE plpgsql;
 
 -- Handle updates
 
 CREATE SCHEMA IF NOT EXISTS place_island_polygon;
 
-CREATE TABLE IF NOT EXISTS place_island_polygon.updates
-(
-    id serial PRIMARY KEY,
-    t text,
-    UNIQUE (t)
-);
-CREATE OR REPLACE FUNCTION place_island_polygon.flag() RETURNS trigger AS
+CREATE OR REPLACE FUNCTION place_island_polygon.update() RETURNS trigger AS
 $$
 BEGIN
-    INSERT INTO place_island_polygon.updates(t) VALUES ('y') ON CONFLICT(t) DO NOTHING;
-    RETURN NULL;
+    RETURN update_osm_island_polygon(NEW);
 END;
 $$ LANGUAGE plpgsql;
 
-CREATE OR REPLACE FUNCTION place_island_polygon.refresh() RETURNS trigger AS
-$$
-BEGIN
-    RAISE LOG 'Refresh place_island_polygon';
-    PERFORM update_osm_island_polygon();
-    -- noinspection SqlWithoutWhere
-    DELETE FROM place_island_polygon.updates;
-    RETURN NULL;
-END;
-$$ LANGUAGE plpgsql;
-
-CREATE TRIGGER trigger_flag
-    AFTER INSERT OR UPDATE OR DELETE
+CREATE TRIGGER trigger_update_polygon
+    BEFORE INSERT OR UPDATE
     ON osm_island_polygon
-    FOR EACH STATEMENT
-EXECUTE PROCEDURE place_island_polygon.flag();
-
-CREATE CONSTRAINT TRIGGER trigger_refresh
-    AFTER INSERT
-    ON place_island_polygon.updates
-    INITIALLY DEFERRED
     FOR EACH ROW
-EXECUTE PROCEDURE place_island_polygon.refresh();
+EXECUTE PROCEDURE place_island_polygon.update();
