@@ -1,93 +1,90 @@
-DROP TRIGGER IF EXISTS trigger_flag ON osm_state_point;
-DROP TRIGGER IF EXISTS trigger_refresh ON place_state.updates;
+DROP TRIGGER IF EXISTS trigger_update_point ON osm_state_point;
+DROP TRIGGER IF EXISTS trigger_delete_point ON osm_state_point;
 
 -- etldoc: ne_10m_admin_1_states_provinces   -> osm_state_point
 -- etldoc: osm_state_point                       -> osm_state_point
 
-CREATE OR REPLACE FUNCTION update_osm_state_point() RETURNS void AS
+CREATE OR REPLACE FUNCTION update_osm_state_point(rec osm_state_point) RETURNS osm_state_point AS
 $$
 BEGIN
-
-    WITH important_state_point AS (
-        SELECT osm.geometry,
-               osm.osm_id,
-               osm.name,
-               COALESCE(NULLIF(osm.name_en, ''), ne.name) AS name_en,
-               ne.scalerank,
-               ne.labelrank,
-               ne.datarank
-        FROM ne_10m_admin_1_states_provinces AS ne,
-             osm_state_point AS osm
-        WHERE
-          -- We only match whether the point is within the Natural Earth polygon
-          -- because name matching is difficult
-            ST_Within(osm.geometry, ne.geometry)
-          -- We leave out leess important states
-          AND ne.scalerank <= 3
-          AND ne.labelrank <= 2
-    )
-    UPDATE osm_state_point AS osm
+    rec.rank = (
         -- Normalize both scalerank and labelrank into a ranking system from 1 to 6.
-    SET "rank" = LEAST(6, CEILING((scalerank + labelrank + datarank) / 3.0))
-    FROM important_state_point AS ne
-    WHERE osm.osm_id = ne.osm_id;
+        SELECT LEAST(6, CEILING((ne.scalerank + ne.labelrank + ne.datarank) / 3.0))
+        FROM ne_10m_admin_1_states_provinces AS ne
+        WHERE
+            -- We only match whether the point is within the Natural Earth polygon
+            -- because name matching is difficult
+            ST_Within(rec.geometry, ne.geometry)
+            -- We leave out leess important states
+            AND ne.scalerank <= 3
+            AND ne.labelrank <= 2
+    );
 
     -- TODO: This shouldn't be necessary? The rank function makes something wrong...
-    UPDATE osm_state_point AS osm
-    SET "rank" = 1
-    WHERE "rank" = 0;
+    IF rec.rank = 0 THEN
+        rec.rank = 1;
+    END IF;
 
-    DELETE FROM osm_state_point WHERE "rank" IS NULL;
+    IF COALESCE(rec.tags->'name:latin', rec.tags->'name:nonlatin', rec.tags->'name_int') IS NULL THEN
+        rec.tags = update_tags(rec.tags, rec.geometry);
+    END IF;
 
-    UPDATE osm_state_point
-    SET tags = update_tags(tags, geometry)
-    WHERE COALESCE(tags->'name:latin', tags->'name:nonlatin', tags->'name_int') IS NULL;
-
+    RETURN rec;
 END;
 $$ LANGUAGE plpgsql;
 
-SELECT update_osm_state_point();
+DO
+$$
+DECLARE
+    orig osm_state_point;
+    up osm_state_point;
+BEGIN
+    FOR orig IN SELECT * FROM osm_state_point
+    LOOP
+        up := update_osm_state_point(orig);
+        IF orig.* IS DISTINCT FROM up.* THEN
+            DELETE FROM osm_state_point WHERE osm_state_point.id = up.id;
+            INSERT INTO osm_state_point VALUES (up.*);
+        END IF;
+    END LOOP;
+END;
+$$ LANGUAGE plpgsql;
 
 CREATE INDEX IF NOT EXISTS osm_state_point_rank_idx ON osm_state_point ("rank");
+
+DELETE FROM osm_state_point
+WHERE rank IS NULL;
 
 -- Handle updates
 
 CREATE SCHEMA IF NOT EXISTS place_state;
 
-CREATE TABLE IF NOT EXISTS place_state.updates
-(
-    id serial PRIMARY KEY,
-    t text,
-    UNIQUE (t)
-);
-CREATE OR REPLACE FUNCTION place_state.flag() RETURNS trigger AS
+CREATE OR REPLACE FUNCTION place_state.update() RETURNS trigger AS
 $$
 BEGIN
-    INSERT INTO place_state.updates(t) VALUES ('y') ON CONFLICT(t) DO NOTHING;
+    RETURN update_osm_state_point(NEW);
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION place_state.delete() RETURNS trigger AS
+$$
+BEGIN
+    DELETE FROM osm_state_point
+    WHERE rank IS NULL;
+
     RETURN NULL;
 END;
 $$ LANGUAGE plpgsql;
 
-CREATE OR REPLACE FUNCTION place_state.refresh() RETURNS trigger AS
-$$
-BEGIN
-    RAISE LOG 'Refresh place_state rank';
-    PERFORM update_osm_state_point();
-    -- noinspection SqlWithoutWhere
-    DELETE FROM place_state.updates;
-    RETURN NULL;
-END;
-$$ LANGUAGE plpgsql;
-
-CREATE TRIGGER trigger_flag
-    AFTER INSERT OR UPDATE OR DELETE
+CREATE TRIGGER trigger_update_point
+    BEFORE INSERT OR UPDATE
     ON osm_state_point
-    FOR EACH STATEMENT
-EXECUTE PROCEDURE place_state.flag();
+    FOR EACH ROW
+EXECUTE PROCEDURE place_state.update();
 
-CREATE CONSTRAINT TRIGGER trigger_refresh
-    AFTER INSERT
-    ON place_state.updates
+CREATE CONSTRAINT TRIGGER trigger_delete_point
+    AFTER INSERT OR UPDATE
+    ON osm_state_point
     INITIALLY DEFERRED
     FOR EACH ROW
-EXECUTE PROCEDURE place_state.refresh();
+EXECUTE PROCEDURE place_state.delete();
