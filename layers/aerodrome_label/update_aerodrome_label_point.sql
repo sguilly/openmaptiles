@@ -1,60 +1,51 @@
-DROP TRIGGER IF EXISTS trigger_flag ON osm_aerodrome_label_point;
-DROP TRIGGER IF EXISTS trigger_refresh ON aerodrome_label.updates;
+DROP TRIGGER IF EXISTS trigger_update_point ON osm_aerodrome_label_point;
 
 -- etldoc: osm_aerodrome_label_point -> osm_aerodrome_label_point
-CREATE OR REPLACE FUNCTION update_aerodrome_label_point() RETURNS void AS
+CREATE OR REPLACE FUNCTION update_aerodrome_label_point(rec osm_aerodrome_label_point) RETURNS osm_aerodrome_label_point AS
 $$
 BEGIN
-    UPDATE osm_aerodrome_label_point
-    SET geometry = ST_Centroid(geometry)
-    WHERE ST_GeometryType(geometry) <> 'ST_Point';
+    IF ST_GeometryType(rec.geometry) <> 'ST_Point' THEN
+        rec.geometry := ST_Centroid(rec.geometry);
+    END IF;
 
-    UPDATE osm_aerodrome_label_point
-    SET tags = update_tags(tags, geometry)
-    WHERE COALESCE(tags->'name:latin', tags->'name:nonlatin', tags->'name_int') IS NULL;
+    IF COALESCE(rec.tags->'name:latin', rec.tags->'name:nonlatin', rec.tags->'name_int') IS NULL THEN
+        rec.tags = update_tags(rec.tags, rec.geometry);
+    END IF;
+
+    RETURN rec;
 END;
 $$ LANGUAGE plpgsql;
 
-SELECT update_aerodrome_label_point();
+DO
+$$
+DECLARE
+    orig osm_aerodrome_label_point;
+    up osm_aerodrome_label_point;
+BEGIN
+    FOR orig IN SELECT * FROM osm_aerodrome_label_point
+    LOOP
+        up := update_aerodrome_label_point(orig);
+        IF orig.* IS DISTINCT FROM up.* THEN
+            DELETE FROM osm_aerodrome_label_point WHERE osm_aerodrome_label_point.id = up.id;
+            INSERT INTO osm_aerodrome_label_point VALUES (up.*);
+        END IF;
+    END LOOP;
+END;
+$$ LANGUAGE plpgsql;
 
 -- Handle updates
 
 CREATE SCHEMA IF NOT EXISTS aerodrome_label;
 
-CREATE TABLE IF NOT EXISTS aerodrome_label.updates
-(
-    id serial PRIMARY KEY,
-    t text,
-    UNIQUE (t)
-);
-CREATE OR REPLACE FUNCTION aerodrome_label.flag() RETURNS trigger AS
+CREATE OR REPLACE FUNCTION aerodrome_label.update() RETURNS trigger AS
 $$
 BEGIN
-    INSERT INTO aerodrome_label.updates(t) VALUES ('y') ON CONFLICT(t) DO NOTHING;
-    RETURN NULL;
+    RETURN update_aerodrome_label_point(NEW);
 END;
 $$ LANGUAGE plpgsql;
 
-CREATE OR REPLACE FUNCTION aerodrome_label.refresh() RETURNS trigger AS
-$$
-BEGIN
-    RAISE LOG 'Refresh aerodrome_label';
-    PERFORM update_aerodrome_label_point();
-    -- noinspection SqlWithoutWhere
-    DELETE FROM aerodrome_label.updates;
-    RETURN NULL;
-END;
-$$ LANGUAGE plpgsql;
-
-CREATE TRIGGER trigger_flag
-    AFTER INSERT OR UPDATE OR DELETE
+CREATE TRIGGER trigger_update_point
+    BEFORE INSERT OR UPDATE
     ON osm_aerodrome_label_point
-    FOR EACH STATEMENT
-EXECUTE PROCEDURE aerodrome_label.flag();
-
-CREATE CONSTRAINT TRIGGER trigger_refresh
-    AFTER INSERT
-    ON aerodrome_label.updates
-    INITIALLY DEFERRED
     FOR EACH ROW
-EXECUTE PROCEDURE aerodrome_label.refresh();
+EXECUTE PROCEDURE aerodrome_label.update();
