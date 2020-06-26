@@ -1,55 +1,60 @@
-DROP TRIGGER IF EXISTS trigger_flag ON osm_city_point;
-DROP TRIGGER IF EXISTS trigger_refresh ON place_city.updates;
+DROP TRIGGER IF EXISTS trigger_update_point ON osm_city_point;
 
 CREATE EXTENSION IF NOT EXISTS unaccent;
 
-CREATE OR REPLACE FUNCTION update_osm_city_point() RETURNS void AS
+CREATE OR REPLACE FUNCTION update_osm_city_point(rec osm_city_point) RETURNS osm_city_point AS
 $$
 BEGIN
-
-    -- Clear  OSM key:rank ( https://github.com/openmaptiles/openmaptiles/issues/108 )
-    -- etldoc: osm_city_point          -> osm_city_point
-    UPDATE osm_city_point AS osm SET "rank" = NULL WHERE "rank" IS NOT NULL;
-
     -- etldoc: ne_10m_populated_places -> osm_city_point
     -- etldoc: osm_city_point          -> osm_city_point
-
-    WITH important_city_point AS (
-        SELECT osm.geometry, osm.osm_id, osm.name, osm.name_en, ne.scalerank, ne.labelrank
-        FROM ne_10m_populated_places AS ne,
-             osm_city_point AS osm
-        WHERE (
-                (osm.tags ? 'wikidata' AND osm.tags->'wikidata' = ne.wikidataid) OR
-                ne.name ILIKE osm.name OR
-                ne.name ILIKE osm.name_en OR
-                ne.namealt ILIKE osm.name OR
-                ne.namealt ILIKE osm.name_en OR
-                ne.meganame ILIKE osm.name OR
-                ne.meganame ILIKE osm.name_en OR
-                ne.gn_ascii ILIKE osm.name OR
-                ne.gn_ascii ILIKE osm.name_en OR
-                ne.nameascii ILIKE osm.name OR
-                ne.nameascii ILIKE osm.name_en OR
-                ne.name = unaccent(osm.name)
-            )
-          AND osm.place IN ('city', 'town', 'village')
-          AND ST_DWithin(ne.geometry, osm.geometry, 50000)
-    )
-    UPDATE osm_city_point AS osm
+    rec.rank = (
         -- Move scalerank to range 1 to 10 and merge scalerank 5 with 6 since not enough cities
         -- are in the scalerank 5 bucket
-    SET "rank" = CASE WHEN scalerank <= 5 THEN scalerank + 1 ELSE scalerank END
-    FROM important_city_point AS ne
-    WHERE osm.osm_id = ne.osm_id;
+        SELECT CASE WHEN scalerank <= 5 THEN scalerank + 1 ELSE scalerank END
+        FROM ne_10m_populated_places AS ne
+        WHERE
+            (
+                (rec.tags ? 'wikidata' AND rec.tags->'wikidata' = ne.wikidataid) OR
+                ne.name ILIKE rec.name OR
+                ne.name ILIKE rec.name_en OR
+                ne.namealt ILIKE rec.name OR
+                ne.namealt ILIKE rec.name_en OR
+                ne.meganame ILIKE rec.name OR
+                ne.meganame ILIKE rec.name_en OR
+                ne.gn_ascii ILIKE rec.name OR
+                ne.gn_ascii ILIKE rec.name_en OR
+                ne.nameascii ILIKE rec.name OR
+                ne.nameascii ILIKE rec.name_en OR
+                ne.name = unaccent(rec.name)
+            )
+            AND rec.place IN ('city', 'town', 'village')
+            AND ST_DWithin(ne.geometry, rec.geometry, 50000)
+    );
 
-    UPDATE osm_city_point
-    SET tags = update_tags(tags, geometry)
-    WHERE COALESCE(tags->'name:latin', tags->'name:nonlatin', tags->'name_int') IS NULL;
+    IF COALESCE(rec.tags->'name:latin', rec.tags->'name:nonlatin', rec.tags->'name_int') IS NULL THEN
+        rec.tags = update_tags(rec.tags, rec.geometry);
+    END IF;
 
+    RETURN rec;
 END;
 $$ LANGUAGE plpgsql;
 
-SELECT update_osm_city_point();
+DO
+$$
+DECLARE
+    orig osm_city_point;
+    up osm_city_point;
+BEGIN
+    FOR orig IN SELECT * FROM osm_city_point
+    LOOP
+        up := update_osm_city_point(orig);
+        IF orig.* IS DISTINCT FROM up.* THEN
+            DELETE FROM osm_city_point WHERE osm_city_point.id = up.id;
+            INSERT INTO osm_city_point VALUES (up.*);
+        END IF;
+    END LOOP;
+END;
+$$ LANGUAGE plpgsql;
 
 CREATE INDEX IF NOT EXISTS osm_city_point_rank_idx ON osm_city_point ("rank");
 
@@ -57,40 +62,15 @@ CREATE INDEX IF NOT EXISTS osm_city_point_rank_idx ON osm_city_point ("rank");
 
 CREATE SCHEMA IF NOT EXISTS place_city;
 
-CREATE TABLE IF NOT EXISTS place_city.updates
-(
-    id serial PRIMARY KEY,
-    t text,
-    UNIQUE (t)
-);
-CREATE OR REPLACE FUNCTION place_city.flag() RETURNS trigger AS
+CREATE OR REPLACE FUNCTION place_city.update() RETURNS trigger AS
 $$
 BEGIN
-    INSERT INTO place_city.updates(t) VALUES ('y') ON CONFLICT(t) DO NOTHING;
-    RETURN NULL;
+    RETURN update_osm_city_point(NEW);
 END;
 $$ LANGUAGE plpgsql;
 
-CREATE OR REPLACE FUNCTION place_city.refresh() RETURNS trigger AS
-$$
-BEGIN
-    RAISE LOG 'Refresh place_city rank';
-    PERFORM update_osm_city_point();
-    -- noinspection SqlWithoutWhere
-    DELETE FROM place_city.updates;
-    RETURN NULL;
-END;
-$$ LANGUAGE plpgsql;
-
-CREATE TRIGGER trigger_flag
-    AFTER INSERT OR UPDATE OR DELETE
+CREATE TRIGGER trigger_update_point
+    BEFORE INSERT OR UPDATE
     ON osm_city_point
-    FOR EACH STATEMENT
-EXECUTE PROCEDURE place_city.flag();
-
-CREATE CONSTRAINT TRIGGER trigger_refresh
-    AFTER INSERT
-    ON place_city.updates
-    INITIALLY DEFERRED
     FOR EACH ROW
-EXECUTE PROCEDURE place_city.refresh();
+EXECUTE PROCEDURE place_city.update();
