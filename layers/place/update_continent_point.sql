@@ -1,57 +1,47 @@
-DROP TRIGGER IF EXISTS trigger_flag ON osm_continent_point;
-DROP TRIGGER IF EXISTS trigger_refresh ON place_continent_point.updates;
+DROP TRIGGER IF EXISTS trigger_update_point ON osm_continent_point;
 
 -- etldoc:  osm_continent_point ->  osm_continent_point
-CREATE OR REPLACE FUNCTION update_osm_continent_point() RETURNS void AS
+CREATE OR REPLACE FUNCTION update_osm_continent_point(rec osm_continent_point) RETURNS osm_continent_point AS
 $$
 BEGIN
-    UPDATE osm_continent_point
-    SET tags = update_tags(tags, geometry)
-    WHERE COALESCE(tags->'name:latin', tags->'name:nonlatin', tags->'name_int') IS NULL;
+    IF COALESCE(rec.tags->'name:latin', rec.tags->'name:nonlatin', rec.tags->'name_int') IS NULL THEN
+        rec.tags = update_tags(rec.tags, rec.geometry);
+    END IF;
 
+    RETURN rec;
 END;
 $$ LANGUAGE plpgsql;
 
-SELECT update_osm_continent_point();
+DO
+$$
+DECLARE
+    orig osm_continent_point;
+    up osm_continent_point;
+BEGIN
+    FOR orig IN SELECT * FROM osm_continent_point
+    LOOP
+        up := update_osm_continent_point(orig);
+        IF orig.* IS DISTINCT FROM up.* THEN
+            DELETE FROM osm_continent_point WHERE osm_continent_point.id = up.id;
+            INSERT INTO osm_continent_point VALUES (up.*);
+        END IF;
+    END LOOP;
+END;
+$$ LANGUAGE plpgsql;
 
 -- Handle updates
 
 CREATE SCHEMA IF NOT EXISTS place_continent_point;
 
-CREATE TABLE IF NOT EXISTS place_continent_point.updates
-(
-    id serial PRIMARY KEY,
-    t text,
-    UNIQUE (t)
-);
-CREATE OR REPLACE FUNCTION place_continent_point.flag() RETURNS trigger AS
+CREATE OR REPLACE FUNCTION place_continent_point.update() RETURNS trigger AS
 $$
 BEGIN
-    INSERT INTO place_continent_point.updates(t) VALUES ('y') ON CONFLICT(t) DO NOTHING;
-    RETURN NULL;
+    RETURN update_osm_continent_point(NEW);
 END;
 $$ LANGUAGE plpgsql;
 
-CREATE OR REPLACE FUNCTION place_continent_point.refresh() RETURNS trigger AS
-$$
-BEGIN
-    RAISE LOG 'Refresh place_continent_point';
-    PERFORM update_osm_continent_point();
-    -- noinspection SqlWithoutWhere
-    DELETE FROM place_continent_point.updates;
-    RETURN NULL;
-END;
-$$ LANGUAGE plpgsql;
-
-CREATE TRIGGER trigger_flag
-    AFTER INSERT OR UPDATE OR DELETE
+CREATE TRIGGER trigger_update_point
+    BEFORE INSERT OR UPDATE
     ON osm_continent_point
-    FOR EACH STATEMENT
-EXECUTE PROCEDURE place_continent_point.flag();
-
-CREATE CONSTRAINT TRIGGER trigger_refresh
-    AFTER INSERT
-    ON place_continent_point.updates
-    INITIALLY DEFERRED
     FOR EACH ROW
-EXECUTE PROCEDURE place_continent_point.refresh();
+EXECUTE PROCEDURE place_continent_point.update();
