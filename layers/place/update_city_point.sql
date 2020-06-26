@@ -1,15 +1,17 @@
-DROP TRIGGER IF EXISTS trigger_flag ON osm_city_point;
-DROP TRIGGER IF EXISTS trigger_refresh ON place_city.updates;
+DROP TRIGGER IF EXISTS trigger_ipdate_point ON osm_city_point;
 
 CREATE EXTENSION IF NOT EXISTS unaccent;
 
-CREATE OR REPLACE FUNCTION update_osm_city_point() RETURNS void AS
+CREATE OR REPLACE FUNCTION update_osm_city_point(new_osm_id bigint) RETURNS void AS
 $$
 BEGIN
 
     -- Clear  OSM key:rank ( https://github.com/openmaptiles/openmaptiles/issues/108 )
     -- etldoc: osm_city_point          -> osm_city_point
-    UPDATE osm_city_point AS osm SET "rank" = NULL WHERE "rank" IS NOT NULL;
+    UPDATE osm_city_point
+    SET "rank" = NULL
+    WHERE (new_osm_id IS NULL OR osm_id = new_osm_id) AND
+          "rank" IS NOT NULL;
 
     -- etldoc: ne_10m_populated_places -> osm_city_point
     -- etldoc: osm_city_point          -> osm_city_point
@@ -40,16 +42,18 @@ BEGIN
         -- are in the scalerank 5 bucket
     SET "rank" = CASE WHEN scalerank <= 5 THEN scalerank + 1 ELSE scalerank END
     FROM important_city_point AS ne
-    WHERE osm.osm_id = ne.osm_id;
+    WHERE (new_osm_id IS NULL OR osm.osm_id = new_osm_id) AND
+          osm.osm_id = ne.osm_id;
 
     UPDATE osm_city_point
     SET tags = update_tags(tags, geometry)
-    WHERE COALESCE(tags->'name:latin', tags->'name:nonlatin', tags->'name_int') IS NULL;
+    WHERE (new_osm_id IS NULL OR osm_id = new_osm_id) AND
+          COALESCE(tags->'name:latin', tags->'name:nonlatin', tags->'name_int') IS NULL;
 
 END;
 $$ LANGUAGE plpgsql;
 
-SELECT update_osm_city_point();
+SELECT update_osm_city_point(NULL);
 
 CREATE INDEX IF NOT EXISTS osm_city_point_rank_idx ON osm_city_point ("rank");
 
@@ -57,40 +61,17 @@ CREATE INDEX IF NOT EXISTS osm_city_point_rank_idx ON osm_city_point ("rank");
 
 CREATE SCHEMA IF NOT EXISTS place_city;
 
-CREATE TABLE IF NOT EXISTS place_city.updates
-(
-    id serial PRIMARY KEY,
-    t  text,
-    UNIQUE (t)
-);
-CREATE OR REPLACE FUNCTION place_city.flag() RETURNS trigger AS
+CREATE OR REPLACE FUNCTION place_city.update() RETURNS trigger AS
 $$
 BEGIN
-    INSERT INTO place_city.updates(t) VALUES ('y') ON CONFLICT(t) DO NOTHING;
+    PERFORM update_osm_city_point(NEW.osm_id);
     RETURN NULL;
 END;
 $$ LANGUAGE plpgsql;
 
-CREATE OR REPLACE FUNCTION place_city.refresh() RETURNS trigger AS
-$$
-BEGIN
-    RAISE LOG 'Refresh place_city rank';
-    PERFORM update_osm_city_point();
-    -- noinspection SqlWithoutWhere
-    DELETE FROM place_city.updates;
-    RETURN NULL;
-END;
-$$ LANGUAGE plpgsql;
-
-CREATE TRIGGER trigger_flag
-    AFTER INSERT OR UPDATE OR DELETE
+CREATE CONSTRAINT TRIGGER trigger_update_point
+    AFTER INSERT OR UPDATE
     ON osm_city_point
-    FOR EACH STATEMENT
-EXECUTE PROCEDURE place_city.flag();
-
-CREATE CONSTRAINT TRIGGER trigger_refresh
-    AFTER INSERT
-    ON place_city.updates
     INITIALLY DEFERRED
     FOR EACH ROW
-EXECUTE PROCEDURE place_city.refresh();
+EXECUTE PROCEDURE place_city.update();
