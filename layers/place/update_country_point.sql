@@ -1,87 +1,71 @@
-DROP TRIGGER IF EXISTS trigger_flag ON osm_country_point;
-DROP TRIGGER IF EXISTS trigger_refresh ON place_country.updates;
+DROP TRIGGER IF EXISTS trigger_update_point ON osm_country_point;
 
 -- etldoc: ne_10m_admin_0_countries   -> osm_country_point
 -- etldoc: osm_country_point          -> osm_country_point
 
-CREATE OR REPLACE FUNCTION update_osm_country_point() RETURNS void AS
+CREATE OR REPLACE FUNCTION update_osm_country_point(rec osm_country_point) RETURNS osm_country_point AS
 $$
 BEGIN
+    rec.rank = 7;
+    rec.iso3166_1_alpha_2 = COALESCE(
+        NULLIF(rec.country_code_iso3166_1_alpha_2, ''),
+        NULLIF(rec.iso3166_1_alpha_2, ''),
+        NULLIF(rec.iso3166_1, '')
+    );
 
-    UPDATE osm_country_point AS osm
-    SET "rank"            = 7,
-        iso3166_1_alpha_2 = COALESCE(
-                NULLIF(osm.country_code_iso3166_1_alpha_2, ''),
-                NULLIF(osm.iso3166_1_alpha_2, ''),
-                NULLIF(osm.iso3166_1, '')
-            );
-
-    WITH important_country_point AS (
-        SELECT osm.geometry,
-               osm.osm_id,
-               osm.name,
-               COALESCE(NULLIF(osm.name_en, ''), ne.name) AS name_en,
-               ne.scalerank,
-               ne.labelrank
-        FROM ne_10m_admin_0_countries AS ne,
-             osm_country_point AS osm
-        WHERE
-          -- We match only countries with ISO codes to eliminate disputed countries
-            iso3166_1_alpha_2 IS NOT NULL
-          -- that lies inside polygon of sovereign country
-          AND ST_Within(osm.geometry, ne.geometry)
-    )
-    UPDATE osm_country_point AS osm
-        -- Normalize both scalerank and labelrank into a ranking system from 1 to 6
-        -- where the ranks are still distributed uniform enough across all countries
-    SET "rank" = LEAST(6, CEILING((scalerank + labelrank) / 2.0))
-    FROM important_country_point AS ne
-    WHERE osm.osm_id = ne.osm_id;
-
-    -- Repeat the step for archipelago countries like Philippines or Indonesia
-    -- whose label point is not within country's polygon
-    WITH important_country_point AS (
-        SELECT osm.osm_id,
---       osm.name,
-               ne.scalerank,
-               ne.labelrank,
---       ST_Distance(osm.geometry, ne.geometry) AS distance,
-               ROW_NUMBER()
-               OVER (
-                   PARTITION BY osm.osm_id
-                   ORDER BY
-                       ST_Distance(osm.geometry, ne.geometry)
-                   ) AS rk
-        FROM osm_country_point osm,
-             ne_10m_admin_0_countries AS ne
-        WHERE iso3166_1_alpha_2 IS NOT NULL
-          AND NOT (osm."rank" BETWEEN 1 AND 6)
-    )
-    UPDATE osm_country_point AS osm
-        -- Normalize both scalerank and labelrank into a ranking system from 1 to 6
-        -- where the ranks are still distributed uniform enough across all countries
-    SET "rank" = LEAST(6, CEILING((ne.scalerank + ne.labelrank) / 2.0))
-    FROM important_country_point AS ne
-    WHERE osm.osm_id = ne.osm_id
-      AND ne.rk = 1;
-
-    UPDATE osm_country_point AS osm
-    SET "rank" = 6
-    WHERE "rank" = 7;
+    rec.rank = COALESCE((
+            -- Normalize both scalerank and labelrank into a ranking system from 1 to 6
+            -- where the ranks are still distributed uniform enough across all countries
+            SELECT LEAST(6, CEILING((ne.scalerank + ne.labelrank) / 2.0))
+            FROM ne_10m_admin_0_countries AS ne
+            WHERE
+                -- We match only countries with ISO codes to eliminate disputed countries
+                iso3166_1_alpha_2 IS NOT NULL
+                -- that lies inside polygon of sovereign country
+                AND ST_Within(rec.geometry, ne.geometry)
+        ), (
+            -- Repeat the step for archipelago countries like Philippines or Indonesia
+            -- whose label point is not within country's polygon
+            SELECT LEAST(6, CEILING((ne.scalerank + ne.labelrank) / 2.0))
+            FROM ne_10m_admin_0_countries AS ne
+            WHERE
+                ne.iso3166_1_alpha_2 IS NOT NULL
+                AND NOT (rec."rank" BETWEEN 1 AND 6)
+            ORDER BY ST_Distance(rec.geometry, ne.geometry)
+            LIMIT 1
+        ),
+        6
+    );
 
     -- TODO: This shouldn't be necessary? The rank function makes something wrong...
-    UPDATE osm_country_point AS osm
-    SET "rank" = 1
-    WHERE "rank" = 0;
+    IF rec.rank = 0 THEN
+        rec.rank = 1;
+    END IF;
 
-    UPDATE osm_country_point
-    SET tags = update_tags(tags, geometry)
-    WHERE COALESCE(tags->'name:latin', tags->'name:nonlatin', tags->'name_int') IS NULL;
+    IF COALESCE(rec.tags->'name:latin', rec.tags->'name:nonlatin', rec.tags->'name_int') IS NULL THEN
+        rec.tags = update_tags(rec.tags, rec.geometry);
+    END IF;
 
+    RETURN rec;
 END;
 $$ LANGUAGE plpgsql;
 
-SELECT update_osm_country_point();
+DO
+$$
+DECLARE
+    orig osm_country_point;
+    up osm_country_point;
+BEGIN
+    FOR orig IN SELECT * FROM osm_country_point
+    LOOP
+        up := update_osm_country_point(orig);
+        IF orig.* IS DISTINCT FROM up.* THEN
+            DELETE FROM osm_country_point WHERE osm_country_point.id = up.id;
+            INSERT INTO osm_country_point VALUES (up.*);
+        END IF;
+    END LOOP;
+END;
+$$ LANGUAGE plpgsql;
 
 CREATE INDEX IF NOT EXISTS osm_country_point_rank_idx ON osm_country_point ("rank");
 
@@ -89,40 +73,15 @@ CREATE INDEX IF NOT EXISTS osm_country_point_rank_idx ON osm_country_point ("ran
 
 CREATE SCHEMA IF NOT EXISTS place_country;
 
-CREATE TABLE IF NOT EXISTS place_country.updates
-(
-    id serial PRIMARY KEY,
-    t text,
-    UNIQUE (t)
-);
-CREATE OR REPLACE FUNCTION place_country.flag() RETURNS trigger AS
+CREATE OR REPLACE FUNCTION place_country.update() RETURNS trigger AS
 $$
 BEGIN
-    INSERT INTO place_country.updates(t) VALUES ('y') ON CONFLICT(t) DO NOTHING;
-    RETURN NULL;
+    RETURN update_osm_country_point(NEW);
 END;
 $$ LANGUAGE plpgsql;
 
-CREATE OR REPLACE FUNCTION place_country.refresh() RETURNS trigger AS
-$$
-BEGIN
-    RAISE LOG 'Refresh place_country rank';
-    PERFORM update_osm_country_point();
-    -- noinspection SqlWithoutWhere
-    DELETE FROM place_country.updates;
-    RETURN NULL;
-END;
-$$ LANGUAGE plpgsql;
-
-CREATE TRIGGER trigger_flag
-    AFTER INSERT OR UPDATE OR DELETE
+CREATE TRIGGER trigger_update_point
+    BEFORE INSERT OR UPDATE
     ON osm_country_point
-    FOR EACH STATEMENT
-EXECUTE PROCEDURE place_country.flag();
-
-CREATE CONSTRAINT TRIGGER trigger_refresh
-    AFTER INSERT
-    ON place_country.updates
-    INITIALLY DEFERRED
     FOR EACH ROW
-EXECUTE PROCEDURE place_country.refresh();
+EXECUTE PROCEDURE place_country.update();
