@@ -1,16 +1,33 @@
 DROP TRIGGER IF EXISTS trigger_update_point ON osm_peak_point;
 
 -- etldoc:  osm_peak_point ->  osm_peak_point
-CREATE OR REPLACE FUNCTION update_osm_peak_point(new_osm_id bigint) RETURNS void AS
+CREATE OR REPLACE FUNCTION update_osm_peak_point(rec osm_peak_point) RETURNS osm_peak_point AS
 $$
-UPDATE osm_peak_point
-SET tags = update_tags(tags, geometry)
-WHERE (new_osm_id IS NULL OR osm_id = new_osm_id)
-  AND COALESCE(tags -> 'name:latin', tags -> 'name:nonlatin', tags -> 'name_int') IS NULL
-  AND tags != update_tags(tags, geometry)
-$$ LANGUAGE SQL;
+BEGIN
+    IF COALESCE(rec.tags->'name:latin', rec.tags->'name:nonlatin', rec.tags->'name_int') IS NULL THEN
+        rec.tags = update_tags(rec.tags, rec.geometry);
+    END IF;
 
-SELECT update_osm_peak_point(NULL);
+    RETURN rec;
+END;
+$$ LANGUAGE plpgsql;
+
+DO
+$$
+DECLARE
+    orig osm_peak_point;
+    up osm_peak_point;
+BEGIN
+    FOR orig IN SELECT * FROM osm_peak_point
+    LOOP
+        up := update_osm_peak_point(orig);
+        IF orig.* IS DISTINCT FROM up.* THEN
+            DELETE FROM osm_peak_point WHERE osm_peak_point.id = up.id;
+            INSERT INTO osm_peak_point VALUES (up.*);
+        END IF;
+    END LOOP;
+END;
+$$ LANGUAGE plpgsql;
 
 -- Handle updates
 
@@ -19,14 +36,12 @@ CREATE SCHEMA IF NOT EXISTS mountain_peak_point;
 CREATE OR REPLACE FUNCTION mountain_peak_point.update() RETURNS trigger AS
 $$
 BEGIN
-    PERFORM update_osm_peak_point(new.osm_id);
-    RETURN NULL;
+    RETURN update_osm_peak_point(NEW);
 END;
 $$ LANGUAGE plpgsql;
 
-CREATE CONSTRAINT TRIGGER trigger_update_point
-    AFTER INSERT OR UPDATE
+CREATE TRIGGER trigger_update_point
+    BEFORE INSERT OR UPDATE
     ON osm_peak_point
-    INITIALLY DEFERRED
     FOR EACH ROW
 EXECUTE PROCEDURE mountain_peak_point.update();
