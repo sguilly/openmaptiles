@@ -88,7 +88,7 @@ FROM (
                 NULL AS mtb_scale,
                 NULL AS surface,
                 z_order
-         FROM osm_transportation_merge_linestring_gen7
+         FROM osm_transportation_merge_linestring_gen6
          WHERE zoom_level = 4
          UNION ALL
 
